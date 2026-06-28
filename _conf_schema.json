@@ -1,0 +1,44 @@
+{
+  "auto_reply_pig_messages": {
+    "description": "开启普通消息猪图触发",
+    "hint": "开启后，用户发送“今日小猪”会返回每日小猪，发送“随机小猪”或普通消息包含猪字/猪表情会返回随机猪图",
+    "type": "bool",
+    "default": true
+  },
+  "pig_trigger_keywords": {
+    "description": "随机猪图触发关键词",
+    "hint": "多个关键词用英文逗号或中文逗号分隔，默认：猪,🐷,🐖,🐽",
+    "type": "string",
+    "default": "猪,🐷,🐖,🐽"
+  },
+  "random_recent_limit": {
+    "description": "随机猪图去重数量",
+    "hint": "同一群聊内优先避开最近发送过的 N 张猪图，设置为 0 可关闭",
+    "type": "int",
+    "default": 8
+  },
+  "at_view_pig": {
+    "description": "开启艾特他人查看今日小猪",
+    "hint": "是否允许通过艾特他人来查看对方的今日小猪，默认为关闭",
+    "type": "bool",
+    "default": false
+  },
+  "enable_remote_resource": {
+    "description": "开启网络猪图资源补全",
+    "hint": "开启后会优先从 PigHub 官方接口刷新猪图索引，并在发送图片时按需下载缓存",
+    "type": "bool",
+    "default": true
+  },
+  "remote_refresh_hours": {
+    "description": "PigHub 索引刷新间隔",
+    "hint": "每隔多少小时尝试刷新一次 PigHub 图片索引，设置为 0 可关闭定时刷新",
+    "type": "int",
+    "default": 12
+  },
+  "remote_resource_base": {
+    "description": "旧版资源兜底地址",
+    "hint": "PigHub 与 PigHub-DB 均不可用时才会尝试使用该旧版资源目录，一般无需修改",
+    "type": "string",
+    "default": "https://raw.githubusercontent.com/MegSopern/astrbot_plugin_rollpig/main/resource"
+  }
+}

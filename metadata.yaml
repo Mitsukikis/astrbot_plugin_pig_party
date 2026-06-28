@@ -1,0 +1,10 @@
+name: "astrbot_plugin_pig_party"
+display_name: "猪猪派对"
+desc: "将今日小猪、随机猪图和含猪字自动回复合并为一个稳定的 PigHub 表情插件。"
+short_desc: "今日小猪、随机猪图与 PigHub 表情池。"
+version: "1.0.0"
+author: "zhajunyao"
+repo: "https://github.com/zhajunyao/astrbot_plugin_pig_party"
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.16.0"
