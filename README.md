@@ -59,7 +59,7 @@
 
 ### 通过 AstrBot 插件市场
 
-在 AstrBot WebUI 的插件市场中搜索 `猪猪派对` 或 `astrbot_plugin_pig_party`，安装后启用即可。
+插件上架后，可在 AstrBot WebUI 的插件市场中搜索 `猪猪派对` 或 `astrbot_plugin_pig_party`，安装后启用即可。
 
 ### 通过 GitHub 仓库
 
