@@ -5,7 +5,7 @@
 <h1 align="center">猪猪派对</h1>
 
 <p align="center">
-  <a href="https://github.com/zhajunyao/astrbot_plugin_pig_party"><img alt="Repository" src="https://img.shields.io/badge/GitHub-astrbot__plugin__pig__party-24292f?logo=github"></a>
+  <a href="https://github.com/Mitsukikis/astrbot_plugin_pig_party"><img alt="Repository" src="https://img.shields.io/badge/GitHub-astrbot__plugin__pig__party-24292f?logo=github"></a>
   <img alt="AstrBot" src="https://img.shields.io/badge/AstrBot-%3E%3D%204.16.0-2f81f7">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-0f766e">
@@ -67,7 +67,7 @@
 
 ```bash
 cd /path/to/AstrBot/data/plugins
-git clone https://github.com/zhajunyao/astrbot_plugin_pig_party.git
+git clone https://github.com/Mitsukikis/astrbot_plugin_pig_party.git
 ```
 
 安装依赖：
@@ -135,10 +135,10 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
   "name": "astrbot_plugin_pig_party",
   "display_name": "猪猪派对",
   "desc": "将今日小猪、随机猪图和含猪字自动回复合并为一个稳定的 PigHub 表情插件。",
-  "author": "zhajunyao",
-  "repo": "https://github.com/zhajunyao/astrbot_plugin_pig_party",
+  "author": "Mitsukikis",
+  "repo": "https://github.com/Mitsukikis/astrbot_plugin_pig_party",
   "tags": ["娱乐", "表情包", "PigHub"],
-  "social_link": "https://github.com/zhajunyao"
+  "social_link": "https://github.com/Mitsukikis"
 }
 ```
 
