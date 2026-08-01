@@ -548,9 +548,10 @@ class PigPartyPlugin(Star):
 
         body = self._message_body(text)
         compact_body = "".join(body.split())
-        # Exact commands are handled by @filter.command. Do not handle them again here.
-        if compact_body in DEFAULT_DAILY_TRIGGERS or compact_body in DEFAULT_RANDOM_TRIGGERS:
-            return None
+        if compact_body in DEFAULT_DAILY_TRIGGERS:
+            return ACTION_DAILY
+        if compact_body in DEFAULT_RANDOM_TRIGGERS:
+            return ACTION_RANDOM
 
         if self._has_command_prefix(text):
             return None
@@ -558,6 +559,21 @@ class PigPartyPlugin(Star):
         if any(keyword and keyword in body for keyword in self.pig_trigger_keywords):
             return ACTION_RANDOM
         return None
+
+    @staticmethod
+    def _claim_event(event: AstrMessageEvent, action: str) -> bool:
+        """Ensure command and plain-message handlers do not process one event twice."""
+        marker = "pig_party_claimed_action"
+        try:
+            if event.get_extra(marker):
+                return False
+            event.set_extra(marker, action)
+            return True
+        except Exception:
+            if getattr(event, marker, None):
+                return False
+            setattr(event, marker, action)
+            return True
 
     def _random_scope_key(self, event: AstrMessageEvent) -> str:
         group_id = self._call_event_getter(event, "get_group_id")
@@ -904,12 +920,16 @@ class PigPartyPlugin(Star):
     @filter.command("今日小猪", alias={"抽小猪", "我的小猪", "rollpig"})
     async def roll_pig(self, event: AstrMessageEvent):
         """抽取今日小猪"""
+        if not self._claim_event(event, ACTION_DAILY):
+            return
         await self._send_daily_pig(event)
         event.stop_event()
 
     @filter.command("随机小猪", alias={"随机猪猪", "猪猪", "rollpig_random"})
     async def random_pig(self, event: AstrMessageEvent):
         """随机发送一张猪猪表情"""
+        if not self._claim_event(event, ACTION_RANDOM):
+            return
         await self.send_random_pig(event)
         event.stop_event()
 
@@ -923,6 +943,8 @@ class PigPartyPlugin(Star):
             return
 
         action = self._classify_plain_message(message_text)
+        if action and not self._claim_event(event, action):
+            return
         if action == ACTION_DAILY:
             await self._send_daily_pig(event)
         elif action == ACTION_RANDOM:

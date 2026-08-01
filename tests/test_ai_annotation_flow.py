@@ -90,11 +90,27 @@ class AiAnnotationFlowTests(unittest.IsolatedAsyncioTestCase):
             "failed",
         )
 
-    async def test_exact_commands_are_not_double_handled_as_plain_messages(self):
+    async def test_exact_commands_are_available_to_plain_group_messages(self):
         self.plugin.pig_trigger_keywords = ["猪", "🐷"]
-        self.assertIsNone(self.plugin._classify_plain_message("今日小猪"))
-        self.assertIsNone(self.plugin._classify_plain_message("随机小猪"))
+        self.assertEqual(self.plugin._classify_plain_message("今日小猪"), "daily")
+        self.assertEqual(self.plugin._classify_plain_message("随机小猪"), "random")
         self.assertEqual(self.plugin._classify_plain_message("你是猪吗"), "random")
+
+    async def test_one_event_can_only_be_claimed_once(self):
+        class StubEvent:
+            def __init__(self):
+                self.extra = {}
+
+            def get_extra(self, key):
+                return self.extra.get(key)
+
+            def set_extra(self, key, value):
+                self.extra[key] = value
+
+        event = StubEvent()
+        self.assertTrue(self.plugin._claim_event(event, "daily"))
+        self.assertFalse(self.plugin._claim_event(event, "daily"))
+        self.assertFalse(self.plugin._claim_event(event, "random"))
 
 
 if __name__ == "__main__":
