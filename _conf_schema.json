@@ -23,6 +23,24 @@
     "type": "bool",
     "default": false
   },
+  "enable_ai_pig_annotation": {
+    "description": "为 PigHub 今日小猪生成看图文案",
+    "hint": "首次抽到一张 PigHub 图片时，让视觉模型根据真实画面生成专属描述和解析，并按图片 ID 缓存；关闭后继续使用静态注解",
+    "type": "bool",
+    "default": true
+  },
+  "ai_annotation_provider_id": {
+    "description": "看图文案模型 ID",
+    "hint": "留空时使用当前会话的默认模型；也可填写 AstrBot 中支持图片输入的 Provider ID（例如 Gemini 视觉模型）",
+    "type": "string",
+    "default": ""
+  },
+  "ai_annotation_timeout_seconds": {
+    "description": "看图文案生成超时秒数",
+    "hint": "模型调用超过该时间后自动回退到静态注解，允许范围 10 到 120 秒",
+    "type": "int",
+    "default": 45
+  },
   "enable_remote_resource": {
     "description": "开启网络猪图资源补全",
     "hint": "开启后会优先从 PigHub 官方接口刷新猪图索引，并在发送图片时按需下载缓存",
