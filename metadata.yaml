@@ -1,8 +1,8 @@
 name: "astrbot_plugin_pig_party"
 display_name: "猪猪派对"
-desc: "将今日小猪、随机猪图和含猪字自动回复合并为一个稳定的 PigHub 表情插件。"
-short_desc: "今日小猪、随机猪图与 PigHub 表情池。"
-version: "1.0.1"
+desc: "将今日小猪、随机猪图和含猪字自动回复合并，并用视觉模型生成贴合画面的趣味文案。"
+short_desc: "带看图专属文案的今日小猪与 PigHub 表情池。"
+version: "1.1.0"
 author: "Mitsukikis"
 repo: "https://github.com/Mitsukikis/astrbot_plugin_pig_party"
 support_platforms:

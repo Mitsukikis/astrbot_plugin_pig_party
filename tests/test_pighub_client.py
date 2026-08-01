@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from pighub_client import (
@@ -5,6 +6,7 @@ from pighub_client import (
     build_pighub_pig_list,
     make_pig_annotation,
     normalize_image_url,
+    parse_ai_annotation,
 )
 
 
@@ -73,6 +75,42 @@ class PigHubClientTests(unittest.TestCase):
         self.assertNotEqual(zombie["analysis"], dice["analysis"])
         self.assertIn("干饭", generic["description"])
         self.assertNotEqual(generic["analysis"], dice["analysis"])
+
+    def test_parses_ai_annotation_from_markdown_wrapper(self):
+        result = parse_ai_annotation(
+            "```json\n"
+            + json.dumps(
+                {
+                    "description": "墨镜小猪在线装酷",
+                    "analysis": "墨镜和翘起的嘴角把气场拉满，今天的你适合带着这份自信出门；遇到麻烦先摆个酷脸，再慢慢把事情处理漂亮。",
+                },
+                ensure_ascii=False,
+            )
+            + "\n```"
+        )
+
+        self.assertEqual(result["description"], "墨镜小猪在线装酷")
+        self.assertIn("墨镜", result["analysis"])
+
+    def test_rejects_incomplete_ai_annotation(self):
+        self.assertEqual(parse_ai_annotation("不是 JSON"), {})
+        self.assertEqual(
+            parse_ai_annotation('{"description":"小猪","analysis":"太短"}'), {}
+        )
+
+    def test_constrains_ai_annotation_for_card_layout(self):
+        result = parse_ai_annotation(
+            json.dumps(
+                {
+                    "description": "戴着红帽子举着饭碗等待开饭的小猪正在出现",
+                    "analysis": "饭碗和红帽子把期待写在了脸上。" * 20,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertLessEqual(len(result["description"]), 22)
+        self.assertLessEqual(len(result["analysis"]), 110)
 
 
 if __name__ == "__main__":

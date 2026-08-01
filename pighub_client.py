@@ -1,4 +1,6 @@
 import hashlib
+import json
+import re
 from pathlib import PurePosixPath
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -246,6 +248,27 @@ def make_pig_annotation(name: str, pig_id: str = "", filename: str = "") -> dict
     return {"description": description, "analysis": analysis}
 
 
+def parse_ai_annotation(text: str) -> dict:
+    """Parse and constrain the JSON annotation returned by a vision provider."""
+    raw = str(text or "").strip()
+    match = re.search(r"\{.*\}", raw, re.S)
+    if not match:
+        return {}
+
+    try:
+        payload = json.loads(match.group(0))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    description = _single_line(payload.get("description"))[:22].strip("，。；;、 ")
+    analysis = _single_line(payload.get("analysis"))[:110].strip()
+    if len(description) < 4 or len(analysis) < 20:
+        return {}
+    return {"description": description, "analysis": analysis}
+
+
 def _is_image_path(path: str) -> bool:
     suffix = PurePosixPath(str(path)).suffix.lower()
     return suffix in IMAGE_EXTENSIONS
@@ -264,3 +287,7 @@ def _stable_pick(options: list[str], seed: str) -> str:
         return ""
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
     return options[int(digest[:8], 16) % len(options)]
+
+
+def _single_line(value) -> str:
+    return " ".join(str(value or "").replace("\x00", "").split())

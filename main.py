@@ -26,6 +26,7 @@ try:
         PIGHUB_GITHUB_TREE_API,
         build_github_pig_list,
         build_pighub_pig_list,
+        parse_ai_annotation,
     )
 except ImportError:
     from pighub_client import (
@@ -33,6 +34,7 @@ except ImportError:
         PIGHUB_GITHUB_TREE_API,
         build_github_pig_list,
         build_pighub_pig_list,
+        parse_ai_annotation,
     )
 
 
@@ -43,6 +45,8 @@ REMOTE_TIMEOUT_SECONDS = 12
 MAX_REMOTE_RESOURCE_BYTES = 24 * 1024 * 1024
 REMOTE_USER_AGENT = "astrbot-plugin-pig-party/remote-resource-loader"
 PIGHUB_SOURCE_PREFIX = "pighub"
+AI_ANNOTATION_CACHE_VERSION = 1
+AI_ANNOTATION_MAX_IMAGE_BYTES = 12 * 1024 * 1024
 ACTION_DAILY = "daily"
 ACTION_RANDOM = "random"
 DEFAULT_PIG_TRIGGER_KEYWORDS = ["猪", "🐷", "🐖", "🐽"]
@@ -65,6 +69,7 @@ class PigPartyPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.context = context
         self.config = config
 
         # 配置项
@@ -86,6 +91,15 @@ class PigPartyPlugin(Star):
         self.random_recent_limit: int = max(
             int(self.config.get("random_recent_limit", 8)), 0
         )
+        self.enable_ai_pig_annotation: bool = self.config.get(
+            "enable_ai_pig_annotation", True
+        )
+        self.ai_annotation_provider_id: str = str(
+            self.config.get("ai_annotation_provider_id", "") or ""
+        ).strip()
+        self.ai_annotation_timeout_seconds: int = max(
+            min(int(self.config.get("ai_annotation_timeout_seconds", 45)), 120), 10
+        )
 
         # 初始化路径
         self.plugin_dir = Path(__file__).parent
@@ -97,7 +111,11 @@ class PigPartyPlugin(Star):
         self.today_path = self.plugin_data_dir / "rollpig_today.json"
         self.random_history_path = self.plugin_data_dir / "random_pig_history.json"
         self.remote_state_path = self.plugin_data_dir / "remote_resource_state.json"
+        self.ai_annotation_cache_path = (
+            self.plugin_data_dir / "pig_ai_annotation_cache.json"
+        )
         self._last_remote_source = ""
+        self._ai_annotation_locks: dict[str, asyncio.Lock] = {}
 
         # 创建必要目录（自动创建font文件夹）
         self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +127,7 @@ class PigPartyPlugin(Star):
         if not self.pig_list:
             logger.error("小猪信息为空或不存在，请检查资源文件！")
         self.random_history = self.load_json(self.random_history_path, {})
+        self.ai_annotation_cache = self._load_ai_annotation_cache()
 
         # 初始化字体（优先插件内自定义字体，跨平台兼容）
         self.font_regular = self._init_regular_font()  # 常规字体（描述/解析）
@@ -237,6 +256,200 @@ class PigPartyPlugin(Star):
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def _load_ai_annotation_cache(self) -> dict:
+        default = {"version": AI_ANNOTATION_CACHE_VERSION, "records": {}}
+        payload = self.load_json(self.ai_annotation_cache_path, default)
+        if not isinstance(payload, dict) or not isinstance(payload.get("records"), dict):
+            return default
+        if payload.get("version") != AI_ANNOTATION_CACHE_VERSION:
+            return default
+        return payload
+
+    @staticmethod
+    def _is_pighub_pig(pig_data: dict) -> bool:
+        return str(pig_data.get("id", "")).startswith(PIGHUB_SOURCE_PREFIX)
+
+    def _cached_ai_annotation(self, pig_data: dict) -> dict:
+        if not self.enable_ai_pig_annotation or not self._is_pighub_pig(pig_data):
+            return {}
+        records = self.ai_annotation_cache.get("records", {})
+        cached = records.get(str(pig_data.get("id", "")), {})
+        if not isinstance(cached, dict) or cached.get("status") != "ok":
+            return {}
+        return parse_ai_annotation(json.dumps(cached, ensure_ascii=False))
+
+    def _apply_cached_ai_annotation(self, pig_data: dict) -> dict:
+        annotation = self._cached_ai_annotation(pig_data)
+        if not annotation:
+            return pig_data
+        result = dict(pig_data)
+        result.update(annotation)
+        return result
+
+    def _resolve_ai_annotation_provider(self, event: AstrMessageEvent):
+        if self.ai_annotation_provider_id:
+            getter = getattr(self.context, "get_provider_by_id", None)
+            if callable(getter):
+                try:
+                    return getter(self.ai_annotation_provider_id)
+                except Exception:
+                    return None
+            return None
+
+        get_using = getattr(self.context, "get_using_provider", None)
+        if not callable(get_using):
+            return None
+        umo = getattr(event, "unified_msg_origin", "")
+        try:
+            return get_using(umo=umo)
+        except TypeError:
+            try:
+                return get_using(umo)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _ai_provider_label(self, provider) -> str:
+        if self.ai_annotation_provider_id:
+            return self.ai_annotation_provider_id
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            provider_id = str(provider_config.get("id", "")).strip()
+            if provider_id:
+                return provider_id
+        return type(provider).__name__ if provider is not None else "current:none"
+
+    @staticmethod
+    def _validated_image_reference(image_path: Path) -> str:
+        try:
+            image_size = image_path.stat().st_size
+        except OSError:
+            return ""
+        if image_size <= 0 or image_size > AI_ANNOTATION_MAX_IMAGE_BYTES:
+            return ""
+        if image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            return ""
+        # AstrBot providers accept local paths and perform provider-specific encoding.
+        # Native Gemini expects a path here; passing a data URL is treated as a filename.
+        return str(image_path.absolute())
+
+    @staticmethod
+    def _ai_annotation_prompt(pig_data: dict) -> str:
+        name = " ".join(str(pig_data.get("name", "未知小猪")).split())[:80]
+        filename = " ".join(str(pig_data.get("filename", "")).split())[:120]
+        return (
+            "请认真观察这张猪猪梗图，为‘今日小猪’生成和画面真正相关的趣味文案。"
+            "必须利用图中能看见的主体、动作、表情、服饰、道具、文字或场景，至少点出两个具体视觉细节；"
+            "不要只根据文件名猜测，不要写成可替换到任意图片上的性格模板。"
+            "description 写 8 到 22 个中文字符，像有梗的称号或一句话；"
+            "analysis 写 55 到 110 个中文字符，把画面细节自然联想到用户今天的状态，轻松、具体、有趣，避免冒犯。"
+            "只输出 JSON，不要 Markdown，不要解释。"
+            "格式：{\"description\":\"……\",\"analysis\":\"……\"}。"
+            f"\n素材名：{name}\n文件名：{filename or '未知'}"
+        )
+
+    def _ai_annotation_retry_blocked(self, pig_id: str, provider_label: str) -> bool:
+        record = self.ai_annotation_cache.get("records", {}).get(pig_id, {})
+        if not isinstance(record, dict) or record.get("status") != "failed":
+            return False
+        if str(record.get("provider_id", "")) != provider_label:
+            return False
+        try:
+            return float(record.get("retry_after", 0)) > time.time()
+        except (TypeError, ValueError):
+            return False
+
+    def _save_ai_annotation_record(self, pig_id: str, record: dict):
+        records = self.ai_annotation_cache.setdefault("records", {})
+        records[pig_id] = record
+        self.save_json(self.ai_annotation_cache_path, self.ai_annotation_cache)
+
+    def _save_ai_annotation_failure(self, pig_id: str, provider_label: str):
+        self._save_ai_annotation_record(
+            pig_id,
+            {
+                "status": "failed",
+                "provider_id": provider_label,
+                "retry_after": int(time.time()) + 30 * 60,
+            },
+        )
+
+    async def _ensure_ai_pig_annotation(
+        self, pig_data: dict, event: AstrMessageEvent
+    ) -> dict:
+        if not self.enable_ai_pig_annotation or not self._is_pighub_pig(pig_data):
+            return pig_data
+
+        cached_result = self._apply_cached_ai_annotation(pig_data)
+        if cached_result is not pig_data:
+            return cached_result
+
+        pig_id = str(pig_data.get("id", ""))
+        lock = self._ai_annotation_locks.setdefault(pig_id, asyncio.Lock())
+        async with lock:
+            cached_result = self._apply_cached_ai_annotation(pig_data)
+            if cached_result is not pig_data:
+                return cached_result
+
+            provider = self._resolve_ai_annotation_provider(event)
+            provider_label = self._ai_provider_label(provider)
+            if self._ai_annotation_retry_blocked(pig_id, provider_label):
+                return pig_data
+            if provider is None:
+                logger.warning("今日小猪识图文案未找到可用模型，暂用静态注解")
+                self._save_ai_annotation_failure(pig_id, provider_label)
+                return pig_data
+
+            try:
+                image_path = await asyncio.to_thread(self.find_image_file, pig_data)
+                if not image_path or not image_path.exists():
+                    raise FileNotFoundError("pig image unavailable")
+                image_reference = await asyncio.to_thread(
+                    self._validated_image_reference, image_path
+                )
+                if not image_reference:
+                    raise ValueError("pig image is empty, unsupported, or too large")
+
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=self._ai_annotation_prompt(pig_data),
+                        image_urls=[image_reference],
+                        max_tokens=300,
+                    ),
+                    timeout=self.ai_annotation_timeout_seconds,
+                )
+                response_text = str(
+                    getattr(response, "completion_text", response) or ""
+                ).strip()
+                annotation = parse_ai_annotation(response_text)
+                if not annotation:
+                    raise ValueError("vision provider returned invalid annotation JSON")
+
+                self._save_ai_annotation_record(
+                    pig_id,
+                    {
+                        "status": "ok",
+                        "provider_id": provider_label,
+                        "generated_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        **annotation,
+                    },
+                )
+                result = dict(pig_data)
+                result.update(annotation)
+                logger.info("已生成并缓存看图文案：%s provider=%s", pig_id, provider_label)
+                return result
+            except Exception as exc:
+                logger.warning(
+                    "今日小猪识图文案生成失败，暂用静态注解：%s error=%s",
+                    pig_id,
+                    type(exc).__name__,
+                )
+                self._save_ai_annotation_failure(pig_id, provider_label)
+                return pig_data
+
     def _load_pig_list(self) -> list[dict]:
         local_data = self.load_json(self.piginfo_path, [])
         if self._is_valid_pig_list(local_data):
@@ -335,10 +548,9 @@ class PigPartyPlugin(Star):
 
         body = self._message_body(text)
         compact_body = "".join(body.split())
-        if compact_body in DEFAULT_DAILY_TRIGGERS:
-            return ACTION_DAILY
-        if compact_body in DEFAULT_RANDOM_TRIGGERS:
-            return ACTION_RANDOM
+        # Exact commands are handled by @filter.command. Do not handle them again here.
+        if compact_body in DEFAULT_DAILY_TRIGGERS or compact_body in DEFAULT_RANDOM_TRIGGERS:
+            return None
 
         if self._has_command_prefix(text):
             return None
@@ -378,7 +590,7 @@ class PigPartyPlugin(Star):
             return None
         for item in self.pig_list:
             if isinstance(item, dict) and str(item.get("id", "")) == pig_id:
-                return item
+                return self._apply_cached_ai_annotation(item)
         return None
 
     def _fetch_remote_pig_list(self) -> list[dict]:
@@ -693,11 +905,13 @@ class PigPartyPlugin(Star):
     async def roll_pig(self, event: AstrMessageEvent):
         """抽取今日小猪"""
         await self._send_daily_pig(event)
+        event.stop_event()
 
     @filter.command("随机小猪", alias={"随机猪猪", "猪猪", "rollpig_random"})
     async def random_pig(self, event: AstrMessageEvent):
         """随机发送一张猪猪表情"""
         await self.send_random_pig(event)
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -737,6 +951,7 @@ class PigPartyPlugin(Star):
         if user_id in user_records:
             pig = self._current_pig_record(user_records[user_id])
             if pig:
+                pig = await self._ensure_ai_pig_annotation(pig, event)
                 if pig != user_records[user_id]:
                     user_records[user_id] = pig
                     self.save_json(self.today_path, today_cache)
@@ -749,6 +964,7 @@ class PigPartyPlugin(Star):
             return
 
         pig = random.choice(self.pig_list)
+        pig = await self._ensure_ai_pig_annotation(pig, event)
         user_records[user_id] = pig
         self.save_json(self.today_path, today_cache)
 

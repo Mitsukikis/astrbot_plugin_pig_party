@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  一个为 AstrBot 打磨的猪猪表情插件：今日小猪、随机猪图、含猪字自动回复，以及来自 PigHub 的大规模表情池。
+  一个为 AstrBot 打磨的猪猪表情插件：今日小猪、看图专属文案、含猪字自动回复，以及来自 PigHub 的大规模表情池。
 </p>
 
 ---
@@ -21,7 +21,7 @@
 
 `猪猪派对` 把两个常见玩法收束成一个干净的 AstrBot 插件：
 
-- `今日小猪`：每个用户每天抽取一张属于自己的小猪，并生成带标题、短描述和性格注解的图文卡片。
+- `今日小猪`：每个用户每天抽取一张属于自己的小猪；PigHub 图片会由 AstrBot 视觉模型读取真实画面，生成带具体细节的趣味描述与解析。
 - `随机小猪`：从 PigHub 表情池随机发送原图，支持静态图和 GIF。
 - 普通消息触发：用户消息里包含 `猪`、`🐷`、`🐖`、`🐽` 等关键词时自动回复随机猪图。
 - 资源自动更新：优先从 PigHub 官方接口刷新索引，失败时使用 PigHub-DB 同步仓库兜底，再失败才回退旧资源目录。
@@ -34,7 +34,7 @@
 | 能力 | 说明 |
 | --- | --- |
 | 今日小猪 | 每个用户每日固定一只，重复查询不会变 |
-| 今日注解 | 根据图片标题生成差异化描述，不再千图一面 |
+| 今日注解 | 视觉模型根据真实画面生成专属文案；同图缓存、失败自动回退 |
 | 随机猪图 | 直接发送 PigHub 原图，GIF 会以 GIF 形式发送 |
 | 含猪触发 | 普通消息带关键词时自动发送随机猪图 |
 | 远程索引 | 默认每 12 小时刷新一次 PigHub 图片索引 |
@@ -86,6 +86,9 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
 | `pig_trigger_keywords` | `猪,🐷,🐖,🐽` | 随机猪图触发关键词，支持中英文逗号分隔 |
 | `random_recent_limit` | `8` | 同一会话内随机猪图的最近去重数量 |
 | `at_view_pig` | `false` | 是否允许通过艾特查看他人的今日小猪 |
+| `enable_ai_pig_annotation` | `true` | 是否为 PigHub 今日小猪生成看图专属文案 |
+| `ai_annotation_provider_id` | 空 | 可选的视觉 Provider ID；留空使用当前会话默认模型 |
+| `ai_annotation_timeout_seconds` | `45` | 识图调用超时秒数，范围 10–120 秒 |
 | `enable_remote_resource` | `true` | 是否启用 PigHub 远程索引和图片下载 |
 | `remote_refresh_hours` | `12` | PigHub 索引刷新间隔，设为 `0` 可关闭 |
 | `remote_resource_base` | 旧版资源地址 | PigHub 失败后的最终兜底资源目录 |
@@ -106,13 +109,14 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
 
 旧的“今日小猪”和“随机猪图”分别处理触发和资源，容易出现抢触发、重复回复、某个插件资源损坏导致另一个插件看起来也异常的问题。`猪猪派对` 把它们合并成一个状态清晰的入口，减少冲突面。
 
-### 注解来自规则，不依赖大模型
+### 识图优先，规则兜底
 
-今日小猪的注解按标题关键词和稳定哈希生成。这样做有三个好处：
+仓库内已有人工文案的本地小猪保持原样。PigHub 动态图片第一次成为“今日小猪”时，插件会把本地图片交给 AstrBot 已配置的视觉 Provider，并要求文案明确利用动作、表情、服饰、道具、文字或场景等可见细节。
 
-- 同一张图片总是同一套解释。
-- 不需要调用模型，成本和延迟都可控。
-- 审核和运行时更透明，不会因为外部模型返回异常导致插件不可用。
+- 成功结果按图片 ID 写入插件数据目录，同一张图片不会重复消耗模型额度。
+- Provider 不可用、超时或返回格式异常时，立即使用标题关键词和稳定哈希生成的静态注解。
+- 失败记录有 30 分钟重试冷却，避免模型故障期间被重复请求。
+- API Key 由 AstrBot Provider 管理，插件不保存第二份密钥。
 
 ### 远程资源只做增量
 
@@ -124,6 +128,7 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
 - 对下载大小设置上限，避免异常大文件拖垮进程。
 - 对远程接口返回值做结构校验，错误 JSON 不会覆盖可用索引。
 - 今日小猪数据和随机历史保存在 AstrBot 插件数据目录中，更新插件时不丢失。
+- 识图文案保存在 `pig_ai_annotation_cache.json`，可以跨用户复用。
 - 合成图片使用临时文件，发送后自动清理。
 
 ## 插件市场信息
@@ -134,7 +139,7 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
 {
   "name": "astrbot_plugin_pig_party",
   "display_name": "猪猪派对",
-  "desc": "将今日小猪、随机猪图和含猪字自动回复合并为一个稳定的 PigHub 表情插件。",
+  "desc": "将今日小猪、随机猪图和含猪字自动回复合并，并用视觉模型生成贴合画面的趣味文案。",
   "author": "Mitsukikis",
   "repo": "https://github.com/Mitsukikis/astrbot_plugin_pig_party",
   "tags": ["娱乐", "表情包", "PigHub"],
@@ -147,7 +152,7 @@ pip install -r astrbot_plugin_pig_party/requirements.txt
 运行测试：
 
 ```bash
-python -B tests/test_pighub_client.py
+python -B -m unittest discover -s tests -v
 ```
 
 做语法检查：
