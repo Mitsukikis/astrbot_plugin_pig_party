@@ -15,6 +15,9 @@ PIGHUB_GITHUB_RAW_BASE = (
 )
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 GENERIC_ANALYSIS = "随机抽到的今日小猪，今天也要保持精神。"
+AI_DESCRIPTION_MAX_CHARS = 18
+AI_ANALYSIS_MAX_CHARS = 72
+SENTENCE_ENDINGS = "。！？!?"
 
 KEYWORD_ANNOTATIONS = [
     (
@@ -262,8 +265,12 @@ def parse_ai_annotation(text: str) -> dict:
     if not isinstance(payload, dict):
         return {}
 
-    description = _single_line(payload.get("description"))[:22].strip("，。；;、 ")
-    analysis = _single_line(payload.get("analysis"))[:110].strip()
+    description = _clip_title(
+        _single_line(payload.get("description")), AI_DESCRIPTION_MAX_CHARS
+    )
+    analysis = _clip_complete_sentence(
+        _single_line(payload.get("analysis")), AI_ANALYSIS_MAX_CHARS
+    )
     if len(description) < 4 or len(analysis) < 20:
         return {}
     return {"description": description, "analysis": analysis}
@@ -291,3 +298,29 @@ def _stable_pick(options: list[str], seed: str) -> str:
 
 def _single_line(value) -> str:
     return " ".join(str(value or "").replace("\x00", "").split())
+
+
+def _clip_title(text: str, limit: int) -> str:
+    clean = str(text or "").strip("，。；;、 ")
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip("，。；;、 ") + "…"
+
+
+def _clip_complete_sentence(text: str, limit: int) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    candidate = clean[:limit].strip()
+    if len(clean) <= limit and candidate.endswith(tuple(SENTENCE_ENDINGS)):
+        return candidate
+
+    last_sentence_end = max(candidate.rfind(char) for char in SENTENCE_ENDINGS)
+    if last_sentence_end >= 19:
+        return candidate[: last_sentence_end + 1].strip()
+
+    last_clause_end = max(candidate.rfind(char) for char in "，；;：:")
+    if last_clause_end >= 19:
+        candidate = candidate[:last_clause_end]
+    candidate = candidate.rstrip("，。；;、：:！？!? ")
+    return candidate + "。" if candidate else ""

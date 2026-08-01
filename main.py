@@ -128,6 +128,7 @@ class PigPartyPlugin(Star):
             logger.error("小猪信息为空或不存在，请检查资源文件！")
         self.random_history = self.load_json(self.random_history_path, {})
         self.ai_annotation_cache = self._load_ai_annotation_cache()
+        self._repair_today_ai_annotations()
 
         # 初始化字体（优先插件内自定义字体，跨平台兼容）
         self.font_regular = self._init_regular_font()  # 常规字体（描述/解析）
@@ -263,7 +264,35 @@ class PigPartyPlugin(Star):
             return default
         if payload.get("version") != AI_ANNOTATION_CACHE_VERSION:
             return default
+        changed = False
+        for record in payload["records"].values():
+            if not isinstance(record, dict) or record.get("status") != "ok":
+                continue
+            annotation = parse_ai_annotation(json.dumps(record, ensure_ascii=False))
+            if annotation and any(record.get(key) != value for key, value in annotation.items()):
+                record.update(annotation)
+                changed = True
+        if changed:
+            self.save_json(self.ai_annotation_cache_path, payload)
+            logger.info("已将旧版看图文案整理为完整短句")
         return payload
+
+    def _repair_today_ai_annotations(self):
+        today_cache = self.load_json(self.today_path, {"date": "", "records": {}})
+        records = today_cache.get("records", {})
+        if not isinstance(records, dict):
+            return
+        changed = False
+        for user_id, pig_data in list(records.items()):
+            if not isinstance(pig_data, dict):
+                continue
+            repaired = self._apply_cached_ai_annotation(pig_data)
+            if repaired != pig_data:
+                records[user_id] = repaired
+                changed = True
+        if changed:
+            self.save_json(self.today_path, today_cache)
+            logger.info("已更新今日小猪缓存中的完整短文案")
 
     @staticmethod
     def _is_pighub_pig(pig_data: dict) -> bool:
@@ -342,8 +371,9 @@ class PigPartyPlugin(Star):
             "请认真观察这张猪猪梗图，为‘今日小猪’生成和画面真正相关的趣味文案。"
             "必须利用图中能看见的主体、动作、表情、服饰、道具、文字或场景，至少点出两个具体视觉细节；"
             "不要只根据文件名猜测，不要写成可替换到任意图片上的性格模板。"
-            "description 写 8 到 22 个中文字符，像有梗的称号或一句话；"
-            "analysis 写 55 到 110 个中文字符，把画面细节自然联想到用户今天的状态，轻松、具体、有趣，避免冒犯。"
+            "description 写 6 到 18 个中文字符，像有梗的称号或一句话；"
+            "analysis 只写 1 到 2 句、总计 40 到 65 个中文字符，把画面细节自然联想到用户今天的状态，轻松、具体、有趣，避免冒犯；"
+            "analysis 必须是完整短句，最后一个字符必须是句号、问号或感叹号。"
             "只输出 JSON，不要 Markdown，不要解释。"
             "格式：{\"description\":\"……\",\"analysis\":\"……\"}。"
             f"\n素材名：{name}\n文件名：{filename or '未知'}"
@@ -415,7 +445,7 @@ class PigPartyPlugin(Star):
                     provider.text_chat(
                         prompt=self._ai_annotation_prompt(pig_data),
                         image_urls=[image_reference],
-                        max_tokens=300,
+                        max_tokens=180,
                     ),
                     timeout=self.ai_annotation_timeout_seconds,
                 )

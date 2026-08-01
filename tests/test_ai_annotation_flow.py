@@ -112,6 +112,31 @@ class AiAnnotationFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.plugin._claim_event(event, "daily"))
         self.assertFalse(self.plugin._claim_event(event, "random"))
 
+    async def test_loading_cache_repairs_old_truncated_analysis(self):
+        self.plugin.ai_annotation_cache_path.write_text(
+            json.dumps(
+                {
+                    "version": AI_ANNOTATION_CACHE_VERSION,
+                    "records": {
+                        "pighub-42": {
+                            "status": "ok",
+                            "description": "风中凌乱，猪立叶！",
+                            "analysis": "今日小猪站在绿叶上，头顶还飘着问号，看起来对今天的安排有点懵。别慌，保持这份可爱的迷茫，说不定就能",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        cache = self.plugin._load_ai_annotation_cache()
+
+        self.assertEqual(
+            cache["records"]["pighub-42"]["analysis"],
+            "今日小猪站在绿叶上，头顶还飘着问号，看起来对今天的安排有点懵。",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

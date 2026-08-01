@@ -109,8 +109,25 @@ class PigHubClientTests(unittest.TestCase):
             )
         )
 
-        self.assertLessEqual(len(result["description"]), 22)
-        self.assertLessEqual(len(result["analysis"]), 110)
+        self.assertLessEqual(len(result["description"]), 18)
+        self.assertLessEqual(len(result["analysis"]), 72)
+        self.assertTrue(result["analysis"].endswith(("。", "！", "？", "!", "?")))
+
+    def test_overlong_analysis_stops_at_a_complete_sentence(self):
+        result = parse_ai_annotation(
+            json.dumps(
+                {
+                    "description": "风中凌乱，猪立叶！",
+                    "analysis": "今日小猪站在绿叶上，头顶还飘着问号，看起来对今天的安排有点懵。别慌，保持这份可爱的迷茫，说不定就能找到方向然后继续一大段话",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(
+            result["analysis"],
+            "今日小猪站在绿叶上，头顶还飘着问号，看起来对今天的安排有点懵。",
+        )
 
 
 if __name__ == "__main__":
