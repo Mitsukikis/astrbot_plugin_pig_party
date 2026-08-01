@@ -18,6 +18,14 @@ GENERIC_ANALYSIS = "随机抽到的今日小猪，今天也要保持精神。"
 AI_DESCRIPTION_MAX_CHARS = 18
 AI_ANALYSIS_MAX_CHARS = 72
 SENTENCE_ENDINGS = "。！？!?"
+UNCOMFORTABLE_IDENTITY_PATTERNS = (
+    "这不就是你吗",
+    "这不就是你么",
+    "说的不就是你吗",
+    "说的不就是你么",
+    "说的就是你",
+    "简直就是你",
+)
 
 KEYWORD_ANNOTATIONS = [
     (
@@ -268,9 +276,10 @@ def parse_ai_annotation(text: str) -> dict:
     description = _clip_title(
         _single_line(payload.get("description")), AI_DESCRIPTION_MAX_CHARS
     )
-    analysis = _clip_complete_sentence(
-        _single_line(payload.get("analysis")), AI_ANALYSIS_MAX_CHARS
+    analysis_text = _remove_uncomfortable_identity_sentences(
+        _single_line(payload.get("analysis"))
     )
+    analysis = _clip_complete_sentence(analysis_text, AI_ANALYSIS_MAX_CHARS)
     if len(description) < 4 or len(analysis) < 20:
         return {}
     return {"description": description, "analysis": analysis}
@@ -324,3 +333,14 @@ def _clip_complete_sentence(text: str, limit: int) -> str:
         candidate = candidate[:last_clause_end]
     candidate = candidate.rstrip("，。；;、：:！？!? ")
     return candidate + "。" if candidate else ""
+
+
+def _remove_uncomfortable_identity_sentences(text: str) -> str:
+    sentences = re.findall(r"[^。！？!?]+[。！？!?]?", str(text or ""))
+    kept: list[str] = []
+    for sentence in sentences:
+        compact = "".join(sentence.split())
+        if any(pattern in compact for pattern in UNCOMFORTABLE_IDENTITY_PATTERNS):
+            continue
+        kept.append(sentence.strip())
+    return "".join(kept).strip()

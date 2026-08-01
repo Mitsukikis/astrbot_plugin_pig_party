@@ -129,6 +129,23 @@ class PigHubClientTests(unittest.TestCase):
             "今日小猪站在绿叶上，头顶还飘着问号，看起来对今天的安排有点懵。",
         )
 
+    def test_removes_uncomfortable_identity_question(self):
+        result = parse_ai_annotation(
+            json.dumps(
+                {
+                    "description": "吃葱装象，梦想 PHP",
+                    "analysis": "小猪叼着两根葱努力扮演大象，脑海里还浮现出 PHP 大象。这不就是你吗？",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(
+            result["analysis"],
+            "小猪叼着两根葱努力扮演大象，脑海里还浮现出 PHP 大象。",
+        )
+        self.assertNotIn("你吗", result["analysis"])
+
 
 if __name__ == "__main__":
     unittest.main()
