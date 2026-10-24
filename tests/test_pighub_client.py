@@ -29,7 +29,9 @@ class PigHubClientTests(unittest.TestCase):
         self.assertEqual(pigs[0]["id"], "pighub-1300")
         self.assertEqual(pigs[0]["name"], "被捕捉的小猪")
         self.assertEqual(pigs[0]["filename"], "被捕捉的小🐖.gif")
-        self.assertNotEqual(pigs[0]["analysis"], "随机抽到的今日小猪，今天也要保持精神。")
+        self.assertNotEqual(
+            pigs[0]["analysis"], "随机抽到的今日小猪，今天也要保持精神。"
+        )
         self.assertIn("%F0%9F%90%96", pigs[0]["image_url"])
 
     def test_rejects_invalid_pighub_payload(self):
@@ -65,7 +67,9 @@ class PigHubClientTests(unittest.TestCase):
     def test_annotations_are_specific_to_pig_names(self):
         zombie = make_pig_annotation("僵尸猪", "pighub-1", "僵尸猪.png")
         dice = make_pig_annotation("猪骰", "pighub-2", "猪骰.png")
-        generic = make_pig_annotation("小猪快到碗里来", "pighub-3", "小猪快到碗里来.jpg")
+        generic = make_pig_annotation(
+            "小猪快到碗里来", "pighub-3", "小猪快到碗里来.jpg"
+        )
 
         self.assertIn("猪脑", zombie["description"])
         self.assertIn("个性", zombie["analysis"])

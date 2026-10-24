@@ -21,18 +21,22 @@ from PIL import Image as PILImage
 from PIL import ImageDraw, ImageFont
 
 try:
+    from .daily_catalog import load_daily_catalog
     from .pighub_client import (
         PIGHUB_API_URL,
         PIGHUB_GITHUB_TREE_API,
         build_github_pig_list,
         build_pighub_pig_list,
+        parse_ai_annotation,
     )
 except ImportError:
+    from daily_catalog import load_daily_catalog
     from pighub_client import (
         PIGHUB_API_URL,
         PIGHUB_GITHUB_TREE_API,
         build_github_pig_list,
         build_pighub_pig_list,
+        parse_ai_annotation,
     )
 
 
@@ -43,6 +47,8 @@ REMOTE_TIMEOUT_SECONDS = 12
 MAX_REMOTE_RESOURCE_BYTES = 24 * 1024 * 1024
 REMOTE_USER_AGENT = "astrbot-plugin-pig-party/remote-resource-loader"
 PIGHUB_SOURCE_PREFIX = "pighub"
+AI_ANNOTATION_CACHE_VERSION = 1
+AI_ANNOTATION_MAX_IMAGE_BYTES = 12 * 1024 * 1024
 ACTION_DAILY = "daily"
 ACTION_RANDOM = "random"
 DEFAULT_PIG_TRIGGER_KEYWORDS = ["猪", "🐷", "🐖", "🐽"]
@@ -65,12 +71,15 @@ class PigPartyPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.context = context
         self.config = config
 
         # 配置项
         self.admins_id: list[str] = context.get_config().get("admins_id", [])
         self.at_view_pig: bool = self.config.get("at_view_pig", False)
-        self.enable_remote_resource: bool = self.config.get("enable_remote_resource", True)
+        self.enable_remote_resource: bool = self.config.get(
+            "enable_remote_resource", True
+        )
         self.remote_resource_base: str = str(
             self.config.get("remote_resource_base", REMOTE_RESOURCE_BASE)
         ).rstrip("/")
@@ -86,6 +95,18 @@ class PigPartyPlugin(Star):
         self.random_recent_limit: int = max(
             int(self.config.get("random_recent_limit", 8)), 0
         )
+        self.daily_pig_source = str(self.config.get("daily_pig_source", "curated"))
+        if self.daily_pig_source not in {"curated", "pighub"}:
+            self.daily_pig_source = "curated"
+        self.enable_ai_pig_annotation: bool = self.config.get(
+            "enable_ai_pig_annotation", True
+        )
+        self.ai_annotation_provider_id: str = str(
+            self.config.get("ai_annotation_provider_id", "") or ""
+        ).strip()
+        self.ai_annotation_timeout_seconds: int = max(
+            min(int(self.config.get("ai_annotation_timeout_seconds", 45)), 120), 10
+        )
 
         # 初始化路径
         self.plugin_dir = Path(__file__).parent
@@ -94,10 +115,16 @@ class PigPartyPlugin(Star):
         self.font_dir = self.res_dir / "font"  # 插件内字体目录（跨平台优先）
         self.piginfo_path = self.res_dir / "pig.json"
         self.image_dir = self.res_dir / "image"
+        self.daily_image_dir = self.res_dir / "daily_image"
+        self.daily_pigs = load_daily_catalog(self.res_dir / "daily_pigs.json")
         self.today_path = self.plugin_data_dir / "rollpig_today.json"
         self.random_history_path = self.plugin_data_dir / "random_pig_history.json"
         self.remote_state_path = self.plugin_data_dir / "remote_resource_state.json"
+        self.ai_annotation_cache_path = (
+            self.plugin_data_dir / "pig_ai_annotation_cache.json"
+        )
         self._last_remote_source = ""
+        self._ai_annotation_locks: dict[str, asyncio.Lock] = {}
 
         # 创建必要目录（自动创建font文件夹）
         self.plugin_data_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +136,8 @@ class PigPartyPlugin(Star):
         if not self.pig_list:
             logger.error("小猪信息为空或不存在，请检查资源文件！")
         self.random_history = self.load_json(self.random_history_path, {})
+        self.ai_annotation_cache = self._load_ai_annotation_cache()
+        self._repair_today_ai_annotations()
 
         # 初始化字体（优先插件内自定义字体，跨平台兼容）
         self.font_regular = self._init_regular_font()  # 常规字体（描述/解析）
@@ -237,6 +266,236 @@ class PigPartyPlugin(Star):
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def _load_ai_annotation_cache(self) -> dict:
+        default = {"version": AI_ANNOTATION_CACHE_VERSION, "records": {}}
+        payload = self.load_json(self.ai_annotation_cache_path, default)
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("records"), dict
+        ):
+            return default
+        if payload.get("version") != AI_ANNOTATION_CACHE_VERSION:
+            return default
+        changed = False
+        for record in payload["records"].values():
+            if not isinstance(record, dict) or record.get("status") != "ok":
+                continue
+            annotation = parse_ai_annotation(json.dumps(record, ensure_ascii=False))
+            if annotation and any(
+                record.get(key) != value for key, value in annotation.items()
+            ):
+                record.update(annotation)
+                changed = True
+        if changed:
+            self.save_json(self.ai_annotation_cache_path, payload)
+            logger.info("已将旧版看图文案整理为完整短句")
+        return payload
+
+    def _repair_today_ai_annotations(self):
+        today_cache = self.load_json(self.today_path, {"date": "", "records": {}})
+        records = today_cache.get("records", {})
+        if not isinstance(records, dict):
+            return
+        changed = False
+        for user_id, pig_data in list(records.items()):
+            if not isinstance(pig_data, dict):
+                continue
+            repaired = self._apply_cached_ai_annotation(pig_data)
+            if repaired != pig_data:
+                records[user_id] = repaired
+                changed = True
+        if changed:
+            self.save_json(self.today_path, today_cache)
+            logger.info("已更新今日小猪缓存中的完整短文案")
+
+    @staticmethod
+    def _is_pighub_pig(pig_data: dict) -> bool:
+        return str(pig_data.get("id", "")).startswith(PIGHUB_SOURCE_PREFIX)
+
+    def _cached_ai_annotation(self, pig_data: dict) -> dict:
+        if not self.enable_ai_pig_annotation or not self._is_pighub_pig(pig_data):
+            return {}
+        records = self.ai_annotation_cache.get("records", {})
+        cached = records.get(str(pig_data.get("id", "")), {})
+        if not isinstance(cached, dict) or cached.get("status") != "ok":
+            return {}
+        return parse_ai_annotation(json.dumps(cached, ensure_ascii=False))
+
+    def _apply_cached_ai_annotation(self, pig_data: dict) -> dict:
+        annotation = self._cached_ai_annotation(pig_data)
+        if not annotation:
+            return pig_data
+        result = dict(pig_data)
+        result.update(annotation)
+        return result
+
+    def _resolve_ai_annotation_provider(self, event: AstrMessageEvent):
+        if self.ai_annotation_provider_id:
+            getter = getattr(self.context, "get_provider_by_id", None)
+            if callable(getter):
+                try:
+                    return getter(self.ai_annotation_provider_id)
+                except Exception:
+                    return None
+            return None
+
+        get_using = getattr(self.context, "get_using_provider", None)
+        if not callable(get_using):
+            return None
+        umo = getattr(event, "unified_msg_origin", "")
+        try:
+            return get_using(umo=umo)
+        except TypeError:
+            try:
+                return get_using(umo)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _ai_provider_label(self, provider) -> str:
+        if self.ai_annotation_provider_id:
+            return self.ai_annotation_provider_id
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            provider_id = str(provider_config.get("id", "")).strip()
+            if provider_id:
+                return provider_id
+        return type(provider).__name__ if provider is not None else "current:none"
+
+    @staticmethod
+    def _validated_image_reference(image_path: Path) -> str:
+        try:
+            image_size = image_path.stat().st_size
+        except OSError:
+            return ""
+        if image_size <= 0 or image_size > AI_ANNOTATION_MAX_IMAGE_BYTES:
+            return ""
+        if image_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            return ""
+        # AstrBot providers accept local paths and perform provider-specific encoding.
+        # Native Gemini expects a path here; passing a data URL is treated as a filename.
+        return str(image_path.absolute())
+
+    @staticmethod
+    def _ai_annotation_prompt(pig_data: dict) -> str:
+        name = " ".join(str(pig_data.get("name", "未知小猪")).split())[:80]
+        filename = " ".join(str(pig_data.get("filename", "")).split())[:120]
+        return (
+            "请认真观察这张猪猪梗图，为‘今日小猪’生成和画面真正相关的趣味文案。"
+            "必须利用图中能看见的主体、动作、表情、服饰、道具、文字或场景，至少点出两个具体视觉细节；"
+            "不要只根据文件名猜测，不要写成可替换到任意图片上的性格模板。"
+            "description 写 6 到 18 个中文字符，像有梗的称号或一句话；"
+            "analysis 只写 1 到 2 句、总计 40 到 65 个中文字符，把画面细节提炼成轻松的今日氛围或小建议，具体、有趣但不要把图中的行为强行套在用户身上；"
+            "禁止使用带指认或嘲讽感的反问，例如‘这不就是你吗’‘说的就是你’‘你是不是也这样’；"
+            "analysis 必须是完整短句，最后一个字符必须是句号、问号或感叹号。"
+            "只输出 JSON，不要 Markdown，不要解释。"
+            '格式：{"description":"……","analysis":"……"}。'
+            f"\n素材名：{name}\n文件名：{filename or '未知'}"
+        )
+
+    def _ai_annotation_retry_blocked(self, pig_id: str, provider_label: str) -> bool:
+        record = self.ai_annotation_cache.get("records", {}).get(pig_id, {})
+        if not isinstance(record, dict) or record.get("status") != "failed":
+            return False
+        if str(record.get("provider_id", "")) != provider_label:
+            return False
+        try:
+            return float(record.get("retry_after", 0)) > time.time()
+        except (TypeError, ValueError):
+            return False
+
+    def _save_ai_annotation_record(self, pig_id: str, record: dict):
+        records = self.ai_annotation_cache.setdefault("records", {})
+        records[pig_id] = record
+        self.save_json(self.ai_annotation_cache_path, self.ai_annotation_cache)
+
+    def _save_ai_annotation_failure(self, pig_id: str, provider_label: str):
+        self._save_ai_annotation_record(
+            pig_id,
+            {
+                "status": "failed",
+                "provider_id": provider_label,
+                "retry_after": int(time.time()) + 30 * 60,
+            },
+        )
+
+    async def _ensure_ai_pig_annotation(
+        self, pig_data: dict, event: AstrMessageEvent
+    ) -> dict:
+        if not self.enable_ai_pig_annotation or not self._is_pighub_pig(pig_data):
+            return pig_data
+
+        cached_result = self._apply_cached_ai_annotation(pig_data)
+        if cached_result is not pig_data:
+            return cached_result
+
+        pig_id = str(pig_data.get("id", ""))
+        lock = self._ai_annotation_locks.setdefault(pig_id, asyncio.Lock())
+        async with lock:
+            cached_result = self._apply_cached_ai_annotation(pig_data)
+            if cached_result is not pig_data:
+                return cached_result
+
+            provider = self._resolve_ai_annotation_provider(event)
+            provider_label = self._ai_provider_label(provider)
+            if self._ai_annotation_retry_blocked(pig_id, provider_label):
+                return pig_data
+            if provider is None:
+                logger.warning("今日小猪识图文案未找到可用模型，暂用静态注解")
+                self._save_ai_annotation_failure(pig_id, provider_label)
+                return pig_data
+
+            try:
+                image_path = await asyncio.to_thread(self.find_image_file, pig_data)
+                if not image_path or not image_path.exists():
+                    raise FileNotFoundError("pig image unavailable")
+                image_reference = await asyncio.to_thread(
+                    self._validated_image_reference, image_path
+                )
+                if not image_reference:
+                    raise ValueError("pig image is empty, unsupported, or too large")
+
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=self._ai_annotation_prompt(pig_data),
+                        image_urls=[image_reference],
+                        max_tokens=180,
+                    ),
+                    timeout=self.ai_annotation_timeout_seconds,
+                )
+                response_text = str(
+                    getattr(response, "completion_text", response) or ""
+                ).strip()
+                annotation = parse_ai_annotation(response_text)
+                if not annotation:
+                    raise ValueError("vision provider returned invalid annotation JSON")
+
+                self._save_ai_annotation_record(
+                    pig_id,
+                    {
+                        "status": "ok",
+                        "provider_id": provider_label,
+                        "generated_at": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        **annotation,
+                    },
+                )
+                result = dict(pig_data)
+                result.update(annotation)
+                logger.info(
+                    "已生成并缓存看图文案：%s provider=%s", pig_id, provider_label
+                )
+                return result
+            except Exception as exc:
+                logger.warning(
+                    "今日小猪识图文案生成失败，暂用静态注解：%s error=%s",
+                    pig_id,
+                    type(exc).__name__,
+                )
+                self._save_ai_annotation_failure(pig_id, provider_label)
+                return pig_data
+
     def _load_pig_list(self) -> list[dict]:
         local_data = self.load_json(self.piginfo_path, [])
         if self._is_valid_pig_list(local_data):
@@ -294,7 +553,11 @@ class PigPartyPlugin(Star):
             return None
 
         history = self.random_history.setdefault(scope_key, [])
-        recent_ids = set(history[-self.random_recent_limit :]) if self.random_recent_limit else set()
+        recent_ids = (
+            set(history[-self.random_recent_limit :])
+            if self.random_recent_limit
+            else set()
+        )
         candidates = [pig for pig in pigs if pig["id"] not in recent_ids]
         if not candidates:
             candidates = pigs
@@ -347,6 +610,21 @@ class PigPartyPlugin(Star):
             return ACTION_RANDOM
         return None
 
+    @staticmethod
+    def _claim_event(event: AstrMessageEvent, action: str) -> bool:
+        """Ensure command and plain-message handlers do not process one event twice."""
+        marker = "pig_party_claimed_action"
+        try:
+            if event.get_extra(marker):
+                return False
+            event.set_extra(marker, action)
+            return True
+        except Exception:
+            if getattr(event, marker, None):
+                return False
+            setattr(event, marker, action)
+            return True
+
     def _random_scope_key(self, event: AstrMessageEvent) -> str:
         group_id = self._call_event_getter(event, "get_group_id")
         if group_id:
@@ -376,10 +654,16 @@ class PigPartyPlugin(Star):
         pig_id = str(pig_data.get("id", ""))
         if not pig_id:
             return None
-        for item in self.pig_list:
+        for item in [*self.daily_pigs, *self.pig_list]:
             if isinstance(item, dict) and str(item.get("id", "")) == pig_id:
-                return item
-        return None
+                return self._apply_cached_ai_annotation(item)
+        # Keep today's assigned picture even when its source index has changed.
+        return self._apply_cached_ai_annotation(dict(pig_data))
+
+    def _daily_pig_pool(self) -> list[dict]:
+        if self.daily_pig_source == "curated" and self.daily_pigs:
+            return self.daily_pigs
+        return self.pig_list
 
     def _fetch_remote_pig_list(self) -> list[dict]:
         self._last_remote_source = ""
@@ -467,12 +751,14 @@ class PigPartyPlugin(Star):
         :return: 图片文件路径，未找到返回None
         """
         pig_data = pig_data_or_id if isinstance(pig_data_or_id, dict) else {}
-        pig_id = (
-            str(pig_data.get("id", ""))
-            if pig_data
-            else str(pig_data_or_id or "")
-        )
+        pig_id = str(pig_data.get("id", "")) if pig_data else str(pig_data_or_id or "")
+        if not pig_id or any(part in pig_id for part in ("/", "\\", "\x00")):
+            return None
         exts = ["png", "jpg", "jpeg", "webp", "gif"]
+        for ext in exts:
+            bundled = self.daily_image_dir / f"{pig_id}.{ext}"
+            if bundled.is_file():
+                return bundled
         for ext in exts:
             file = self.image_dir / f"{pig_id}.{ext}"
             if file.exists():
@@ -486,11 +772,7 @@ class PigPartyPlugin(Star):
 
     def _download_remote_image(self, pig_data_or_id, exts: list[str]) -> Path | None:
         pig_data = pig_data_or_id if isinstance(pig_data_or_id, dict) else {}
-        pig_id = (
-            str(pig_data.get("id", ""))
-            if pig_data
-            else str(pig_data_or_id or "")
-        )
+        pig_id = str(pig_data.get("id", "")) if pig_data else str(pig_data_or_id or "")
         if not pig_id or any(part in pig_id for part in ("/", "\\")):
             logger.warning("小猪ID不合法，跳过网络图片下载：%s", pig_id)
             return None
@@ -528,153 +810,111 @@ class PigPartyPlugin(Star):
         suffix = Path(path).suffix.lower().lstrip(".")
         return suffix if suffix in exts else None
 
+    def _wrap_card_lines(self, text: str, font, max_width: int) -> list[str]:
+        lines = []
+        for paragraph in str(text).splitlines() or [""]:
+            current = ""
+            for char in paragraph:
+                if current and self._get_text_size(current + char, font)[0] > max_width:
+                    lines.append(current)
+                    current = ""
+                current += char
+            lines.append(current)
+        return lines
 
     def render_pig_image(self, pig_data: dict) -> Path | None:
-        """
-        整体居中渲染（垂直+水平双居中）\n
-        :param pig_data: 小猪数据字典
-        :return: 生成的图片临时文件路径，失败返回None
-        """
-        pig_id = pig_data.get("id", "")
-        pig_name = pig_data.get("name", "未知小猪")
-        pig_desc = pig_data.get("description", "无描述")
-        pig_analysis = pig_data.get("analysis", "无解析")
-
-        # 1. 画布基础配置
-        canvas_width = self.CANVAS_WIDTH
-        canvas_height = self.CANVAS_HEIGHT
-        canvas = PILImage.new("RGB", (canvas_width, canvas_height), (255, 255, 255))
-        draw = ImageDraw.Draw(canvas)
-
-        # 2. 预加载所有元素并计算尺寸（用于总高度计算）
-        # 2.1 头像尺寸【核心修改：放大到280x280】
-        avatar_w, avatar_h = self.AVATAR_SIZE, self.AVATAR_SIZE
-        avatar = None
-        avatar_path = self.find_image_file(pig_data)
-        if avatar_path:
-            try:
-                avatar = PILImage.open(avatar_path)
-                avatar.thumbnail((avatar_w, avatar_h))
-                # 居中裁剪（保证正方形，适配新尺寸：280/2=140）
-                if avatar.size != (avatar_w, avatar_h):
-                    center_x = avatar.width // 2
-                    center_y = avatar.height // 2
-                    half = self.AVATAR_SIZE // 2
-                    crop_box = (
-                        center_x - half,
-                        center_y - half,
-                        center_x + half,
-                        center_y + half,
-                    )
-                    avatar = avatar.crop(crop_box)
-            except Exception as e:
-                logger.error(f"加载小猪图片失败：{str(e)}")
-                avatar = None
-
-        # 2.2 名称尺寸
+        """Render the full per-pig text without clipping longer descriptions."""
+        width = self.CANVAS_WIDTH
+        text_width = int(width * self.ANALYSIS_WIDTH_RATIO)
         name_font = self.font_bold
-        name_w, name_h = self._get_text_size(pig_name, name_font)
-
-        # 2.3 描述尺寸
-        desc_font = self.font_regular.font_variant(
-            size=self.DESC_FONT_SIZE
-        )  # 匹配示例的描述字号
-        desc_w, desc_h = self._get_text_size(pig_desc, desc_font)
-
-        # 2.4 解析尺寸（自动换行后）
+        desc_font = self.font_regular.font_variant(size=self.DESC_FONT_SIZE)
         analysis_font = self.font_regular.font_variant(size=self.ANALYSIS_FONT_SIZE)
-        line_height = int(
-            self.ANALYSIS_FONT_SIZE * self.ANALYSIS_LINE_HEIGHT_FACTOR
-        )  # 匹配示例的行间距
-        max_analysis_width = int(
-            canvas_width * self.ANALYSIS_WIDTH_RATIO
-        )  # 更宽的解析区域
-        # 解析文字换行
-        analysis_lines = []
-        current_line = ""
-        for char in pig_analysis:
-            current_line += char
-            line_w, _ = self._get_text_size(current_line, analysis_font)
-            if line_w > max_analysis_width:
-                analysis_lines.append(current_line[:-1])
-                current_line = char
-        if current_line:
-            analysis_lines.append(current_line)
-        # 计算解析总高度
-        analysis_total_h = len(analysis_lines) * line_height
-
-        # 3. 计算整体内容总高度（所有元素+间距）
-        spacing_avatar_name = (
-            self.SPACING_AVATAR_NAME
-        )  # 头像放大后，间距从30调小到20，避免布局拥挤
-        spacing_name_desc = self.SPACING_NAME_DESC  # 名称到描述的间距保持
-        spacing_desc_analysis = self.SPACING_DESC_ANALYSIS  # 描述到解析的间距保持
-        total_content_h = (
-            avatar_h
-            + spacing_avatar_name
-            + name_h
-            + spacing_name_desc
-            + desc_h
-            + spacing_desc_analysis
-            + analysis_total_h
+        name_lines = self._wrap_card_lines(
+            pig_data.get("name", "未知小猪"), name_font, text_width
         )
-
-        # 4. 计算垂直居中的起始Y坐标（核心：让整个内容块在画布中垂直居中）
-        start_y = (canvas_height - total_content_h) // 2
-
-        # 5. 绘制所有元素（基于起始Y坐标，保证整体居中）
-        # 5.1 绘制头像（水平+垂直居中）
-        avatar_x = (canvas_width - avatar_w) // 2
-        avatar_y = start_y
-        if avatar:
-            canvas.paste(
-                avatar,
-                (avatar_x, avatar_y),
-                mask=avatar if avatar.mode == "RGBA" else None,
-            )
-        else:
-            # 头像加载失败时的提示（适配新尺寸）
-            error_font = self.font_regular.font_variant(size=24)
-            error_text = "图片加载失败"
-            error_w, error_h = self._get_text_size(error_text, error_font)
-            error_x = (canvas_width - error_w) // 2
+        desc_lines = self._wrap_card_lines(
+            pig_data.get("description", "无描述"), desc_font, text_width
+        )
+        analysis_lines = self._wrap_card_lines(
+            pig_data.get("analysis", "无解析"), analysis_font, text_width
+        )
+        name_line_height = self.NAME_FONT_SIZE + 12
+        desc_line_height = self.DESC_FONT_SIZE + 12
+        analysis_line_height = int(
+            self.ANALYSIS_FONT_SIZE * self.ANALYSIS_LINE_HEIGHT_FACTOR
+        )
+        content_height = (
+            self.AVATAR_SIZE
+            + self.SPACING_AVATAR_NAME
+            + len(name_lines) * name_line_height
+            + self.SPACING_NAME_DESC
+            + len(desc_lines) * desc_line_height
+            + self.SPACING_DESC_ANALYSIS
+            + len(analysis_lines) * analysis_line_height
+        )
+        height = max(self.CANVAS_HEIGHT, content_height + 120)
+        canvas = PILImage.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(canvas)
+        y = (height - content_height) // 2
+        image_path = self.find_image_file(pig_data)
+        if image_path:
+            try:
+                with PILImage.open(image_path) as source:
+                    avatar = source.convert("RGBA")
+                avatar.thumbnail((self.AVATAR_SIZE, self.AVATAR_SIZE))
+                canvas.paste(
+                    avatar,
+                    (
+                        (width - avatar.width) // 2,
+                        y + (self.AVATAR_SIZE - avatar.height) // 2,
+                    ),
+                    avatar,
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning("小猪图片读取失败：%s", type(exc).__name__)
+                image_path = None
+        if not image_path:
+            message = "图片加载失败"
+            message_width, _ = self._get_text_size(message, desc_font)
             draw.text(
-                (error_x, avatar_y + 120),  # 从90调到120，适配280高度的头像居中
-                error_text,
-                fill=(255, 0, 0),
-                font=error_font,
+                ((width - message_width) // 2, y + 120),
+                message,
+                fill="red",
+                font=desc_font,
             )
 
-        # 5.2 绘制名称（水平居中）
-        name_y = avatar_y + avatar_h + spacing_avatar_name
-        name_x = (canvas_width - name_w) // 2
-        self._draw_bold_text(draw, (name_x, name_y), pig_name, name_font, (0, 0, 0))
-
-        # 5.3 绘制描述（水平居中）
-        desc_y = name_y + name_h + spacing_name_desc
-        desc_x = (canvas_width - desc_w) // 2
-        draw.text((desc_x, desc_y), pig_desc, fill=(85, 85, 85), font=desc_font)
-
-        # 5.4 绘制解析（逐行水平居中）
-        analysis_y = desc_y + desc_h + spacing_desc_analysis
+        y += self.AVATAR_SIZE + self.SPACING_AVATAR_NAME
+        for line in name_lines:
+            line_width, _ = self._get_text_size(line, name_font)
+            self._draw_bold_text(
+                draw, ((width - line_width) // 2, y), line, name_font, (0, 0, 0)
+            )
+            y += name_line_height
+        y += self.SPACING_NAME_DESC
+        for line in desc_lines:
+            line_width, _ = self._get_text_size(line, desc_font)
+            draw.text(
+                ((width - line_width) // 2, y), line, fill=(85, 85, 85), font=desc_font
+            )
+            y += desc_line_height
+        y += self.SPACING_DESC_ANALYSIS
         for line in analysis_lines:
-            line_w, line_h = self._get_text_size(line, analysis_font)
-            line_x = (canvas_width - line_w) // 2
-            draw.text((line_x, analysis_y), line, fill=(51, 51, 51), font=analysis_font)
-            analysis_y += line_height
+            line_width, _ = self._get_text_size(line, analysis_font)
+            draw.text(
+                ((width - line_width) // 2, y),
+                line,
+                fill=(51, 51, 51),
+                font=analysis_font,
+            )
+            y += analysis_line_height
 
-        # 6. 保存临时文件
         try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp_path = Path(tmp.name)
-                canvas.save(tmp_path, format="PNG", quality=95)
-            logger.debug(f"合成图片成功，临时文件路径：{tmp_path.absolute()}")
-            if not tmp_path.exists():
-                logger.error(f"临时文件创建失败：{tmp_path}")
-                return None
-            return tmp_path
-        except Exception as e:
-            logger.error(f"合成图片失败：{str(e)}")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temporary:
+                path = Path(temporary.name)
+                canvas.save(path, format="PNG")
+            return path
+        except OSError as exc:
+            logger.error("合成小猪图片失败：%s", type(exc).__name__)
             return None
 
     def get_at_ids(self, event: AstrMessageEvent) -> list[str]:
@@ -692,12 +932,18 @@ class PigPartyPlugin(Star):
     @filter.command("今日小猪", alias={"抽小猪", "我的小猪", "rollpig"})
     async def roll_pig(self, event: AstrMessageEvent):
         """抽取今日小猪"""
+        if not self._claim_event(event, ACTION_DAILY):
+            return
         await self._send_daily_pig(event)
+        event.stop_event()
 
     @filter.command("随机小猪", alias={"随机猪猪", "猪猪", "rollpig_random"})
     async def random_pig(self, event: AstrMessageEvent):
         """随机发送一张猪猪表情"""
+        if not self._claim_event(event, ACTION_RANDOM):
+            return
         await self.send_random_pig(event)
+        event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -709,6 +955,8 @@ class PigPartyPlugin(Star):
             return
 
         action = self._classify_plain_message(message_text)
+        if action and not self._claim_event(event, action):
+            return
         if action == ACTION_DAILY:
             await self._send_daily_pig(event)
         elif action == ACTION_RANDOM:
@@ -718,12 +966,11 @@ class PigPartyPlugin(Star):
         today_str = datetime.date.today().isoformat()
         user_id = event.get_sender_id()
         if self.at_view_pig:
-            parts = event.message_str.strip().split()
             at_ids = self.get_at_ids(event)
             if len(at_ids) > 1:
                 await event.send(event.plain_result("一次只能抽取一个小猪哦！"))
                 return
-            if len(parts) >= 2:
+            if at_ids:
                 if at_ids[0] not in self.admins_id:
                     user_id = at_ids[0]
                 else:
@@ -737,6 +984,7 @@ class PigPartyPlugin(Star):
         if user_id in user_records:
             pig = self._current_pig_record(user_records[user_id])
             if pig:
+                pig = await self._ensure_ai_pig_annotation(pig, event)
                 if pig != user_records[user_id]:
                     user_records[user_id] = pig
                     self.save_json(self.today_path, today_cache)
@@ -744,11 +992,13 @@ class PigPartyPlugin(Star):
                 await self.send_rendered_pig(event, pig, user_id)
                 return
 
-        if not self.pig_list:
+        daily_pool = self._daily_pig_pool()
+        if not daily_pool:
             await event.send(event.plain_result("小猪信息加载失败，请检查后台报错！"))
             return
 
-        pig = random.choice(self.pig_list)
+        pig = dict(random.choice(daily_pool))
+        pig = await self._ensure_ai_pig_annotation(pig, event)
         user_records[user_id] = pig
         self.save_json(self.today_path, today_cache)
 
@@ -809,7 +1059,6 @@ class PigPartyPlugin(Star):
         pig_name = pig_data.get("name", "未知小猪")
         pig_desc = pig_data.get("description", "无描述")
         pig_analysis = pig_data.get("analysis", "无解析")
-        pig_id = pig_data.get("id", "")
 
         text_msg = (
             f"【今日小猪】\n名称：{pig_name}\n描述：{pig_desc}\n解析：{pig_analysis}"
