@@ -1,4 +1,6 @@
 import hashlib
+import json
+import re
 from pathlib import PurePosixPath
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -13,6 +15,17 @@ PIGHUB_GITHUB_RAW_BASE = (
 )
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 GENERIC_ANALYSIS = "随机抽到的今日小猪，今天也要保持精神。"
+AI_DESCRIPTION_MAX_CHARS = 18
+AI_ANALYSIS_MAX_CHARS = 72
+SENTENCE_ENDINGS = "。！？!?"
+UNCOMFORTABLE_IDENTITY_PATTERNS = (
+    "这不就是你吗",
+    "这不就是你么",
+    "说的不就是你吗",
+    "说的不就是你么",
+    "说的就是你",
+    "简直就是你",
+)
 
 KEYWORD_ANNOTATIONS = [
     (
@@ -246,6 +259,32 @@ def make_pig_annotation(name: str, pig_id: str = "", filename: str = "") -> dict
     return {"description": description, "analysis": analysis}
 
 
+def parse_ai_annotation(text: str) -> dict:
+    """Parse and constrain the JSON annotation returned by a vision provider."""
+    raw = str(text or "").strip()
+    match = re.search(r"\{.*\}", raw, re.S)
+    if not match:
+        return {}
+
+    try:
+        payload = json.loads(match.group(0))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    description = _clip_title(
+        _single_line(payload.get("description")), AI_DESCRIPTION_MAX_CHARS
+    )
+    analysis_text = _remove_uncomfortable_identity_sentences(
+        _single_line(payload.get("analysis"))
+    )
+    analysis = _clip_complete_sentence(analysis_text, AI_ANALYSIS_MAX_CHARS)
+    if len(description) < 4 or len(analysis) < 20:
+        return {}
+    return {"description": description, "analysis": analysis}
+
+
 def _is_image_path(path: str) -> bool:
     suffix = PurePosixPath(str(path)).suffix.lower()
     return suffix in IMAGE_EXTENSIONS
@@ -264,3 +303,44 @@ def _stable_pick(options: list[str], seed: str) -> str:
         return ""
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
     return options[int(digest[:8], 16) % len(options)]
+
+
+def _single_line(value) -> str:
+    return " ".join(str(value or "").replace("\x00", "").split())
+
+
+def _clip_title(text: str, limit: int) -> str:
+    clean = str(text or "").strip("，。；;、 ")
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip("，。；;、 ") + "…"
+
+
+def _clip_complete_sentence(text: str, limit: int) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    candidate = clean[:limit].strip()
+    if len(clean) <= limit and candidate.endswith(tuple(SENTENCE_ENDINGS)):
+        return candidate
+
+    last_sentence_end = max(candidate.rfind(char) for char in SENTENCE_ENDINGS)
+    if last_sentence_end >= 19:
+        return candidate[: last_sentence_end + 1].strip()
+
+    last_clause_end = max(candidate.rfind(char) for char in "，；;：:")
+    if last_clause_end >= 19:
+        candidate = candidate[:last_clause_end]
+    candidate = candidate.rstrip("，。；;、：:！？!? ")
+    return candidate + "。" if candidate else ""
+
+
+def _remove_uncomfortable_identity_sentences(text: str) -> str:
+    sentences = re.findall(r"[^。！？!?]+[。！？!?]?", str(text or ""))
+    kept: list[str] = []
+    for sentence in sentences:
+        compact = "".join(sentence.split())
+        if any(pattern in compact for pattern in UNCOMFORTABLE_IDENTITY_PATTERNS):
+            continue
+        kept.append(sentence.strip())
+    return "".join(kept).strip()
